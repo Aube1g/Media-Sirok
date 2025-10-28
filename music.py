@@ -10,12 +10,12 @@ import yt_dlp
 import re
 
 # ТВОИ РАБОЧИЕ API
-YOUTUBE_API_KEY = "AIzaSyDRb5v81fCgHXjGUdaYYi2JQVr9ZWhZzds"
-AUDD_API_TOKEN = "68131322b91e192191630d5fcd32614e"
-TELEGRAM_BOT_TOKEN = "8466849152:AAHmgdx4vZ-Q6PqxtGnIXLTXGZ-zAeWZLRs"
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY', "AIzaSyDRb5v81fCgHXjGUdaYYi2JQVr9ZWhZzds")
+AUDD_API_TOKEN = os.environ.get('AUDD_API_TOKEN', "68131322b91e192191630d5fcd32614e")
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', "8466849152:AAHmgdx4vZ-Q6PqxtGnIXLTXGZ-zAeWZLRs")
 
 # АДМИН ПАРОЛЬ
-ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', "admin123")
 ADMIN_USERS = []
 
 # Настройка логирования БЕЗ HTTP запросов
@@ -27,7 +27,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -40,8 +39,12 @@ for handler in logging.getLogger().handlers:
 
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('music_bot.db', check_same_thread=False)
+        # Сохраняем БД в рабочую директорию (сохраняется между деплоями)
+        self.db_path = 'music_bot.db'
+        
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.create_tables()
+        logger.info(f"База данных инициализирована: {self.db_path}")
     
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -1389,7 +1392,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     context.user_data['waiting_for_broadcast'] = False
     context.user_data['broadcast_type'] = None
     
-    progress_msg = await update.message.reply_text("> 📢 Рассылка начата\\.\\.\\. Отправлено 0/{len(target_users)}")
+    progress_msg = await update.message.reply_text(f"> 📢 Рассылка начата\\.\\.\\. Отправлено 0/{len(target_users)}")
     
     success_count = 0
     fail_count = 0
@@ -1472,7 +1475,8 @@ async def show_main_menu(callback_query, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-def main():
+async def main():
+    """Основная асинхронная функция для запуска бота"""
     print("🎵 Музыкальный бот запускается...")
     print(f"🔑 Пароль админки: {ADMIN_PASSWORD}")
     print("🎶 Deezer API: Активен")
@@ -1486,7 +1490,7 @@ def main():
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", handle_admin_command))  # ФИКС: Добавлен обработчик команды /admin
+    application.add_handler(CommandHandler("admin", handle_admin_command))
     application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(handle_callback))
@@ -1496,9 +1500,10 @@ def main():
     print("👑 Для входа в админку: /admin")
     print("🔧 Исправлены ошибки банов и добавлены обложки!")
     print("📝 Все сообщения теперь в стиле цитирования MarkdownV2!")
+    print("🚀 Бот работает на Render!")
     
     # Запуск бота
-    application.run_polling()
+    await application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
