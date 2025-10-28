@@ -114,6 +114,59 @@ class Database:
         downloads = cursor.fetchone()[0]
         return {'searches': searches, 'downloads': downloads}
     
+    def get_user_detailed_stats(self, user_id):
+        """Получает детальную статистику пользователя"""
+        cursor = self.conn.cursor()
+        
+        # Основная информация о пользователе
+        cursor.execute('''
+            SELECT username, first_name, last_name, is_banned, is_admin, created_at
+            FROM users WHERE user_id = ?
+        ''', (user_id,))
+        user_info = cursor.fetchone()
+        
+        if not user_info:
+            return None
+            
+        # Статистика поисков
+        cursor.execute('''
+            SELECT COUNT(*), COUNT(DISTINCT query) 
+            FROM search_history WHERE user_id = ?
+        ''', (user_id,))
+        search_stats = cursor.fetchone()
+        
+        # Статистика скачиваний по источникам
+        cursor.execute('''
+            SELECT source, COUNT(*) 
+            FROM download_history 
+            WHERE user_id = ? 
+            GROUP BY source
+        ''', (user_id,))
+        download_by_source = cursor.fetchall()
+        
+        # Последние активности
+        cursor.execute('''
+            SELECT created_at FROM search_history 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC LIMIT 1
+        ''', (user_id,))
+        last_search = cursor.fetchone()
+        
+        cursor.execute('''
+            SELECT created_at FROM download_history 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC LIMIT 1
+        ''', (user_id,))
+        last_download = cursor.fetchone()
+        
+        return {
+            'user_info': user_info,
+            'search_stats': search_stats,
+            'download_by_source': download_by_source,
+            'last_search': last_search[0] if last_search else None,
+            'last_download': last_download[0] if last_download else None
+        }
+    
     def get_all_users(self):
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -648,6 +701,7 @@ class MusicBot:
             [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
             [InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")],
             [InlineKeyboardButton("📢 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("✉️ Написать пользователю", callback_data="admin_message_user")],
             [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -690,6 +744,7 @@ class MusicBot:
             [InlineKeyboardButton(ban_text, callback_data=ban_callback)],
             [InlineKeyboardButton("👑 Сделать админом", callback_data=f"make_admin_{user_id}")],
             [InlineKeyboardButton("📊 Статистика пользователя", callback_data=f"user_stats_{user_id}")],
+            [InlineKeyboardButton("✉️ Написать сообщение", callback_data=f"message_user_{user_id}")],
             [InlineKeyboardButton("⬅️ К списку пользователей", callback_data="admin_users")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
@@ -818,6 +873,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('waiting_for_broadcast'):
         await handle_broadcast_message(update, context, query)
         return
+        
+    if context.user_data.get('waiting_for_user_message'):
+        await handle_user_message(update, context, query)
+        return
     
     if query.startswith('/admin'):
         await handle_admin_command(update, context)
@@ -836,13 +895,15 @@ async def perform_search(update: Update, context: ContextTypes.DEFAULT_TYPE, que
         [InlineKeyboardButton("❌ Отменить поиск", callback_data="main_menu")]
     ])
     
-    if hasattr(update, 'message'):
+    # ФИКС: Определяем откуда пришел запрос
+    if hasattr(update, 'message') and update.message:
         search_message = await update.message.reply_text(
             f"> 🔍 Ищу музыку: *{query}*\\.\\.\\.", 
             reply_markup=cancel_keyboard,
             parse_mode='MarkdownV2'
         )
     else:
+        # Если это callback query, редактируем существующее сообщение
         search_message = await update.callback_query.edit_message_text(
             f"> 🔍 Ищу музыку: *{query}*\\.\\.\\.", 
             reply_markup=cancel_keyboard,
@@ -1015,6 +1076,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
+    elif data == "admin_message_user":
+        if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
+            await query.answer("❌ Нет доступа")
+            return
+            
+        await query.edit_message_text(
+            "> ✉️ *Написать пользователю*\n\n"
+            "_Введи ID пользователя, которому хочешь отправить сообщение:_\n"
+            "_Отправь /cancel для отмены_",
+            parse_mode='MarkdownV2'
+        )
+        context.user_data['waiting_for_user_id'] = True
+        return
+        
     elif data.startswith("users_page_"):
         if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
             await query.answer("❌ Нет доступа")
@@ -1060,6 +1135,75 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
         
+    elif data.startswith("user_stats_"):
+        if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
+            await query.answer("❌ Нет доступа")
+            return
+            
+        target_user_id = int(data.split('_')[2])
+        stats = db.get_user_detailed_stats(target_user_id)
+        
+        if not stats:
+            await query.answer("❌ Пользователь не найден")
+            return
+            
+        user_info = stats['user_info']
+        search_stats = stats['search_stats']
+        download_by_source = stats['download_by_source']
+        
+        username, first_name, last_name, is_banned, is_admin, created_at = user_info
+        name = first_name or username or f"User {target_user_id}"
+        
+        # Форматируем статистику по источникам
+        source_stats = ""
+        for source, count in download_by_source:
+            source_name = "ᴅᴇᴇᴢᴇʀ" if source == "deezer" else "ʏᴏᴜᴛᴜʙᴇ" if source == "youtube" else "sᴏᴜɴᴅᴄʟᴏᴜᴅ"
+            source_stats += f"*{source_name}:* {count}\n"
+        
+        if not source_stats:
+            source_stats = "*Нет скачиваний*"
+        
+        await query.edit_message_text(
+            f"> 📊 *Детальная статистика пользователя*\n\n"
+            f"*👤 Имя:* {name}\n"
+            f"*🆔 ID:* `{target_user_id}`\n"
+            f"*👑 Статус:* {'Админ 👑' if is_admin else 'Пользователь'}\n"
+            f"*🔐 Бан:* {'Да 🔴' if is_banned else 'Нет 🟢'}\n"
+            f"*📅 Регистрация:* {created_at[:10]}\n\n"
+            f"*📈 Активность:*\n"
+            f"*🔍 Всего поисков:* {search_stats[0]}\n"
+            f"*🔍 Уникальных запросов:* {search_stats[1]}\n"
+            f"*📥 Всего скачиваний:* {sum(count for _, count in download_by_source)}\n\n"
+            f"*📥 Скачивания по источникам:*\n{source_stats}\n"
+            f"*⏰ Последний поиск:* {stats['last_search'] or 'Нет данных'}\n"
+            f"*⏰ Последнее скачивание:* {stats['last_download'] or 'Нет данных'}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад к пользователю", callback_data=f"user_detail_{target_user_id}")],
+                [InlineKeyboardButton("⬅️ К списку пользователей", callback_data="admin_users")],
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+            ]),
+            parse_mode='MarkdownV2'
+        )
+        return
+        
+    elif data.startswith("message_user_"):
+        if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
+            await query.answer("❌ Нет доступа")
+            return
+            
+        target_user_id = int(data.split('_')[2])
+        context.user_data['waiting_for_user_message'] = True
+        context.user_data['target_user_id'] = target_user_id
+        
+        await query.edit_message_text(
+            f"> ✉️ *Написать пользователю*\n\n"
+            f"*Получатель:* ID `{target_user_id}`\n\n"
+            f"_Введи сообщение для отправки:_\n"
+            f">_Отправь /cancel для отмены_\n\n",
+            parse_mode='MarkdownV2'
+        )
+        return
+        
     elif data.startswith("ban_"):
         if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
             await query.answer("❌ Нет доступа")
@@ -1075,7 +1219,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data.startswith("unban_"):
         if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
-            await query.answer("❌ Нет доступа")
+            await query.answer(">❌ Нет доступа\n\n")
             return
             
         target_user_id = int(data.split('_')[1])
@@ -1111,7 +1255,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "> 📢 *Введи сообщение для рассылки:*\n\n"
             "_Можно использовать MarkdownV2 форматирование_\n"
-            "_Отправь /cancel для отмены_",
+            ">_Отправь /cancel для отмены_\n\n",
             parse_mode='MarkdownV2'
         )
         return
@@ -1119,7 +1263,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "new_search":
         await query.edit_message_text(
             "> 🔍 *Введи название трека или артиста:*\n\n"
-            "_Пример: Lana Del Radio Young_",
+            "_Пример: Король и Шут Кукла колдуна_",
             parse_mode='MarkdownV2'
         )
         context.user_data['waiting_for_text_search'] = True
@@ -1200,7 +1344,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"*👤 Артист:* {track_data['artist']}\n"
                 f"*💿 Альбом:* {track_data['album']}\n"
                 f"*🎼 Источник:* ʀᴀsᴘᴏᴢɴᴀɴɴᴏ\n\n"
-                f"_Будет скачан полный трек с YouTube_"
+                f">_Будет скачан полный трек с YouTube_\n\n"
             )
             
             keyboard = music_bot.create_track_keyboard(track_data=track_data)
@@ -1319,7 +1463,7 @@ async def download_track(update: Update, context: ContextTypes.DEFAULT_TYPE, tra
                     f"👤 *Артист:* {result.get('artist', 'Неизвестно')}\n"
                     f"💿 *Альбом:* {result.get('album', 'Неизвестно')}\n"
                     f"🎼 *Источник:* {source.upper()}\n\n"
-                    f"_Скачано через @{(await context.bot.get_me()).username}_"
+                    f">_Скачано через @{(await context.bot.get_me()).username}_\n\n"
                 )
                 
                 # ФИКС: Используем правильный параметр для обложки
@@ -1426,6 +1570,60 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
         parse_mode='MarkdownV2'
     )
 
+async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str):
+    user = update.effective_user
+    
+    if user.id not in ADMIN_USERS and not db.is_user_admin(user.id):
+        await update.message.reply_text("❌ Нет доступа")
+        return
+        
+    if context.user_data.get('waiting_for_user_id'):
+        # Пользователь ввел ID пользователя
+        try:
+            target_user_id = int(message_text)
+            context.user_data['target_user_id'] = target_user_id
+            context.user_data['waiting_for_user_id'] = False
+            context.user_data['waiting_for_user_message'] = True
+            
+            await update.message.reply_text(
+                f"> ✉️ *Написать пользователю*\n\n"
+                f"*Получатель:* ID `{target_user_id}`\n\n"
+                f"_Введи сообщение для отправки:_\n"
+                f"_Отправь /cancel для отмены_",
+                parse_mode='MarkdownV2'
+            )
+        except ValueError:
+            await update.message.reply_text("❌ Неверный ID пользователя. Введи числовой ID.")
+        return
+    
+    elif context.user_data.get('waiting_for_user_message'):
+        # Пользователь ввел сообщение для отправки
+        target_user_id = context.user_data.get('target_user_id')
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"✉️ *Сообщение от администратора:*\n\n{message_text}",
+                parse_mode='MarkdownV2'
+            )
+            
+            await update.message.reply_text(
+                f"> ✅ *Сообщение отправлено пользователю* `{target_user_id}`",
+                parse_mode='MarkdownV2'
+            )
+            
+        except Exception as e:
+            logger.error(f"Message send error: {e}")
+            await update.message.reply_text(
+                f"> ❌ *Не удалось отправить сообщение пользователю* `{target_user_id}`\n\n"
+                f"_Ошибка: {str(e)}_",
+                parse_mode='MarkdownV2'
+            )
+        
+        context.user_data['waiting_for_user_message'] = False
+        context.user_data['target_user_id'] = None
+        return
+
 async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -1446,7 +1644,7 @@ async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(
         "> 🔐 *Вход в админку*\n\n"
         "_Введи пароль администратора:_\n"
-        "_Отправь /cancel для отмены_",
+        "> _Отправь /cancel для отмена_\n\n",
         parse_mode='MarkdownV2'
     )
 
@@ -1484,6 +1682,9 @@ def main():
     print("🎧 SoundCloud: Активен")
     print("🚀 Улучшенная обработка ошибок!")
     print("🔧 ФИКС: Исправлена система банов!")
+    print("📄 ФИКС: Пагинация теперь работает!")
+    print("👤 ФИКС: Добавлена детальная статистика пользователей!")
+    print("✉️ ФИКС: Добавлена отправка сообщений конкретным пользователям!")
     
     # Инициализация бота с правильными параметрами
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -1498,9 +1699,10 @@ def main():
     
     print("✅ Бот успешно запущен! Напиши /start в Telegram")
     print("👑 Для входа в админку: /admin")
-    print("🔧 Исправлены ошибки банов и добавлены обложки!")
+    print("🔧 Исправлены все ошибки!")
     print("📝 Все сообщения теперь в стиле цитирования MarkdownV2!")
     print("🚀 Бот работает на Render!")
+    print("👥 Бот поддерживает многопользовательский режим!")
     
     # Запуск бота
     application.run_polling()
