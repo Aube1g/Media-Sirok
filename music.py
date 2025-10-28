@@ -1475,8 +1475,8 @@ async def show_main_menu(callback_query, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-async def main():
-    """Основная асинхронная функция для запуска бота"""
+def main():
+    """Основная функция для запуска бота"""
     print("🎵 Музыкальный бот запускается...")
     print(f"🔑 Пароль админки: {ADMIN_PASSWORD}")
     print("🎶 Deezer API: Активен")
@@ -1503,7 +1503,7 @@ async def main():
     print("🚀 Бот работает на Render!")
     
     # Запуск бота
-    await application.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
